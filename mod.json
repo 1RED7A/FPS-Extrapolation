@@ -1,0 +1,20 @@
+{
+    "geode": ">=5.0.0",
+    "gd": {
+        "win": "2.2081",
+        "android": "2.2081"
+    },
+    "id": "1red7a.fps-extrapolation",
+    "name": "Frame Extrapolation",
+    "version": "1.0.0",
+    "developer": "1Red7A",
+    "description": "Smooths gameplay by predicting player position between physics ticks.",
+    "settings": {
+        "enabled": {
+            "type": "bool",
+            "default": true,
+            "name": "Enable Frame Extrapolation",
+            "description": "Smooths between frames by predicting where the player will be using its velocity."
+        }
+    }
+}
