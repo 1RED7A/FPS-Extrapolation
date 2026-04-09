@@ -20,23 +20,24 @@ struct ExtrapolationFields {
     float modifiedDeltaReturn = 0.f;
 
     // Camera
-    CCPoint lastCamPos        = {};
-    CCPoint lastCamPos2       = {};
-    CCPoint lastCamDelta      = {};
+    // FIX 1: use explicit {0.f, 0.f} instead of {} — CCPoint has ambiguous operator=
+    CCPoint lastCamPos        = {0.f, 0.f};
+    CCPoint lastCamPos2       = {0.f, 0.f};
+    CCPoint lastCamDelta      = {0.f, 0.f};
 
     // Ground layer 1
-    CCPoint lastGroundPos     = {};
-    CCPoint lastGroundPos2    = {};
+    CCPoint lastGroundPos     = {0.f, 0.f};
+    CCPoint lastGroundPos2    = {0.f, 0.f};
 
-    // Ground layer 2  (FIX 1: fully separate history from layer 1)
-    CCPoint lastGround2Pos    = {};
-    CCPoint lastGround2Pos2   = {};
+    // Ground layer 2
+    CCPoint lastGround2Pos    = {0.f, 0.f};
+    CCPoint lastGround2Pos2   = {0.f, 0.f};
 
     // Player rotations
     float lastRot1            = 0.f;
     float lastRot2            = 0.f;
 
-    // FIX 3: per-instance frame counter (was a shared static — now lives here)
+    // Per-instance frame counter
     int frameCounter          = 0;
     int lastUpdateFrame       = -1;
 };
@@ -55,19 +56,18 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
         ex.timeTilNextTick     = 0.f;
         ex.progressTilNextTick = 0.f;
         ex.modifiedDeltaReturn = 0.f;
-        ex.lastCamPos          = {};
-        ex.lastCamPos2         = {};
-        ex.lastCamDelta        = {};
-        ex.lastGroundPos       = {};
-        ex.lastGroundPos2      = {};
-        ex.lastGround2Pos      = {};
-        ex.lastGround2Pos2     = {};
+        // FIX 1: CCPointZero avoids the ambiguous operator= with {}
+        ex.lastCamPos          = CCPointZero;
+        ex.lastCamPos2         = CCPointZero;
+        ex.lastCamDelta        = CCPointZero;
+        ex.lastGroundPos       = CCPointZero;
+        ex.lastGroundPos2      = CCPointZero;
+        ex.lastGround2Pos      = CCPointZero;
+        ex.lastGround2Pos2     = CCPointZero;
         ex.lastRot1            = 0.f;
         ex.lastRot2            = 0.f;
-        // NOTE: frameCounter intentionally not reset — it tracks render frames,
-        // not game state. lastUpdateFrame is reset so the next update is treated
-        // as a fresh tick.
         ex.lastUpdateFrame     = -1;
+        // frameCounter intentionally NOT reset
     }
 
     // ── Capture modifiedDelta ─────────────────────────────────────────────────
@@ -75,18 +75,6 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
         float pRet = GJBaseGameLayer::getModifiedDelta(dt);
         m_fields->ex.modifiedDeltaReturn = pRet;
         return pRet;
-    }
-
-    // ── Hook: death / restart ─────────────────────────────────────────────────
-    void resetLevel() {
-        resetExtrapolationState();
-        GJBaseGameLayer::resetLevel();
-    }
-
-    // ── Hook: level begins / checkpoint ──────────────────────────────────────
-    void startGame() {
-        resetExtrapolationState();
-        GJBaseGameLayer::startGame();
     }
 
     // ── Main update ───────────────────────────────────────────────────────────
@@ -107,27 +95,25 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
 
         auto& ex = m_fields->ex;
 
-        // FIX 3: per-instance counter, not a shared static
         ex.frameCounter++;
 
         bool tickFired = (ex.modifiedDeltaReturn != 0.f) ||
                          (ex.frameCounter != ex.lastUpdateFrame + 1);
 
         if (tickFired) {
-
-            // FIX 1: ground layer 1 history — fully independent
+            // Ground layer 1 history
             if (m_groundLayer) {
                 ex.lastGroundPos2 = ex.lastGroundPos;
                 ex.lastGroundPos  = m_groundLayer->getPosition();
             }
 
-            // FIX 1: ground layer 2 history — fully independent
+            // Ground layer 2 history
             if (m_groundLayer2) {
                 ex.lastGround2Pos2 = ex.lastGround2Pos;
                 ex.lastGround2Pos  = m_groundLayer2->getPosition();
             }
 
-            // Speed-change detection (Section 8)
+            // Speed-change detection
             CCPoint currentDelta = ex.lastCamPos - ex.lastCamPos2;
             float   deltaChange  = ccpDistance(currentDelta, ex.lastCamDelta);
             if (deltaChange > SPEED_CHANGE_THRESHOLD) {
@@ -239,18 +225,21 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PlayLayer modification — FIX 2: safe levelComplete reset
-// Instead of an unsafe cross-class cast, we hook resetLevel which PlayLayer
-// calls internally as part of its cleanup. If a direct hook is needed, we
-// use the Geode m_fields accessor pattern correctly via GJBaseGameLayer.
+// PlayLayer modification
+// FIX 2: resetLevel moved here — GJBaseGameLayer::resetLevel is inline/unhookable
+// FIX 3: startGame removed — does not exist on GJBaseGameLayer
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(ExtrapolatedPlayLayer, PlayLayer) {
 
-    // levelComplete triggers the end animation. We reset BEFORE calling the
-    // original so no stale camera position leaks into the end screen.
-    // FIX 2: access resetExtrapolationState through the correct Geode hook
-    // by casting to our modified type using static_cast on the same object
-    // pointer (safe because $modify guarantees the vtable is ours).
+    // Fires on death and manual restart
+    void resetLevel() {
+        static_cast<ExtrapolatedGameLayer*>(
+            static_cast<GJBaseGameLayer*>(this)
+        )->resetExtrapolationState();
+        PlayLayer::resetLevel();
+    }
+
+    // Fires when the level end animation begins
     void levelComplete() {
         static_cast<ExtrapolatedGameLayer*>(
             static_cast<GJBaseGameLayer*>(this)
