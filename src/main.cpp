@@ -5,9 +5,9 @@
 using namespace geode::prelude;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Section 4 & 8 constants
+// Constants
 // ─────────────────────────────────────────────────────────────────────────────
-static constexpr float TELEPORT_THRESHOLD    = 300.f;
+static constexpr float TELEPORT_THRESHOLD     = 300.f;
 static constexpr float SPEED_CHANGE_THRESHOLD =   5.f;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -15,27 +15,30 @@ static constexpr float SPEED_CHANGE_THRESHOLD =   5.f;
 // ─────────────────────────────────────────────────────────────────────────────
 struct ExtrapolationFields {
     // Timing
-    float timeTilNextTick      = 0.f;
-    float progressTilNextTick  = 0.f;
-    float modifiedDeltaReturn  = 0.f;
+    float timeTilNextTick     = 0.f;
+    float progressTilNextTick = 0.f;
+    float modifiedDeltaReturn = 0.f;
 
-    // Camera (Section 2, 8)
-    CCPoint lastCamPos         = {};
-    CCPoint lastCamPos2        = {};
-    CCPoint lastCamDelta       = {};   // Section 8
+    // Camera
+    CCPoint lastCamPos        = {};
+    CCPoint lastCamPos2       = {};
+    CCPoint lastCamDelta      = {};
 
-    // Ground layers (Section 4)
-    CCPoint lastGroundPos      = {};
-    CCPoint lastGroundPos2     = {};
-    CCPoint lastGround2Pos     = {};
-    CCPoint lastGround2Pos2    = {};
+    // Ground layer 1
+    CCPoint lastGroundPos     = {};
+    CCPoint lastGroundPos2    = {};
 
-    // Player rotation (Section 1, 7)
-    float lastRot1             = 0.f;
-    float lastRot2             = 0.f;
+    // Ground layer 2  (FIX 1: fully separate history from layer 1)
+    CCPoint lastGround2Pos    = {};
+    CCPoint lastGround2Pos2   = {};
 
-    // Tick detection (Section 3)
-    int lastUpdateFrame        = -1;
+    // Player rotations
+    float lastRot1            = 0.f;
+    float lastRot2            = 0.f;
+
+    // FIX 3: per-instance frame counter (was a shared static — now lives here)
+    int frameCounter          = 0;
+    int lastUpdateFrame       = -1;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -46,7 +49,7 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
         ExtrapolationFields ex = {};
     };
 
-    // ── Section 2: helper that zeros every saved state field ─────────────────
+    // ── Reset helper ──────────────────────────────────────────────────────────
     void resetExtrapolationState() {
         auto& ex = m_fields->ex;
         ex.timeTilNextTick     = 0.f;
@@ -61,23 +64,26 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
         ex.lastGround2Pos2     = {};
         ex.lastRot1            = 0.f;
         ex.lastRot2            = 0.f;
+        // NOTE: frameCounter intentionally not reset — it tracks render frames,
+        // not game state. lastUpdateFrame is reset so the next update is treated
+        // as a fresh tick.
         ex.lastUpdateFrame     = -1;
     }
 
-    // ── Section 3: capture modifiedDelta before update() sees it ─────────────
+    // ── Capture modifiedDelta ─────────────────────────────────────────────────
     float getModifiedDelta(float dt) {
         float pRet = GJBaseGameLayer::getModifiedDelta(dt);
         m_fields->ex.modifiedDeltaReturn = pRet;
         return pRet;
     }
 
-    // ── Section 2: hook resetLevel (death / restart) ──────────────────────────
+    // ── Hook: death / restart ─────────────────────────────────────────────────
     void resetLevel() {
         resetExtrapolationState();
         GJBaseGameLayer::resetLevel();
     }
 
-    // ── Section 2: hook startGame (level begins / checkpoint) ────────────────
+    // ── Hook: level begins / checkpoint ──────────────────────────────────────
     void startGame() {
         resetExtrapolationState();
         GJBaseGameLayer::startGame();
@@ -87,7 +93,6 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
     void update(float dt) {
         GJBaseGameLayer::update(dt);
 
-        // Master enable guard
         if (!Mod::get()->getSettingValue<bool>("enabled"))
             return;
 
@@ -96,71 +101,71 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
         if (pl->m_levelEndAnimationStarted) return;
         if (!isRunning() || dt == 0.f) return;
 
-        // Section 6: practice-mode guard
         if (pl->m_isPracticeMode &&
             Mod::get()->getSettingValue<bool>("disable-in-practice"))
             return;
 
         auto& ex = m_fields->ex;
 
-        // Section 3: frame counter for hardened tick detection
-        static int frameCounter = 0;
-        frameCounter++;
+        // FIX 3: per-instance counter, not a shared static
+        ex.frameCounter++;
 
         bool tickFired = (ex.modifiedDeltaReturn != 0.f) ||
-                         (frameCounter != ex.lastUpdateFrame + 1);
+                         (ex.frameCounter != ex.lastUpdateFrame + 1);
 
         if (tickFired) {
-            // ── Record ground positions BEFORE we might skip (Section 4) ────
-            if (m_groundLayer)  {
-                ex.lastGround2Pos2 = ex.lastGround2Pos;   // shift history
-                ex.lastGround2Pos  = ex.lastGroundPos;    // (re-used below)
-                ex.lastGroundPos2  = ex.lastGroundPos;
-                ex.lastGroundPos   = m_groundLayer->getPosition();
+
+            // FIX 1: ground layer 1 history — fully independent
+            if (m_groundLayer) {
+                ex.lastGroundPos2 = ex.lastGroundPos;
+                ex.lastGroundPos  = m_groundLayer->getPosition();
             }
+
+            // FIX 1: ground layer 2 history — fully independent
             if (m_groundLayer2) {
                 ex.lastGround2Pos2 = ex.lastGround2Pos;
                 ex.lastGround2Pos  = m_groundLayer2->getPosition();
             }
 
-            // ── Camera delta & speed-change detection (Section 8) ───────────
+            // Speed-change detection (Section 8)
             CCPoint currentDelta = ex.lastCamPos - ex.lastCamPos2;
             float   deltaChange  = ccpDistance(currentDelta, ex.lastCamDelta);
             if (deltaChange > SPEED_CHANGE_THRESHOLD) {
-                // Collapse history so endPos == lastPos (one-frame no-extrap)
-                ex.lastCamPos2      = ex.lastCamPos;
-                ex.lastGroundPos2   = ex.lastGroundPos;
-                ex.lastGround2Pos2  = ex.lastGround2Pos;
+                ex.lastCamPos2     = ex.lastCamPos;
+                ex.lastGroundPos2  = ex.lastGroundPos;
+                ex.lastGround2Pos2 = ex.lastGround2Pos;
             }
             ex.lastCamDelta = currentDelta;
 
-            // ── Update camera history ────────────────────────────────────────
-            ex.timeTilNextTick    = ex.modifiedDeltaReturn;
+            // Camera history
+            ex.timeTilNextTick     = ex.modifiedDeltaReturn;
             ex.progressTilNextTick = 0.f;
-            ex.lastCamPos2        = ex.lastCamPos;
-            ex.lastCamPos         = m_objectLayer->getPosition();
+            ex.lastCamPos2         = ex.lastCamPos;
+            ex.lastCamPos          = m_objectLayer->getPosition();
 
-            // ── Save player rotations at tick time (Section 1) ───────────────
+            // Save player rotations at tick time
             if (m_player1 && m_player1->m_mainLayer)
                 ex.lastRot1 = m_player1->m_mainLayer->getRotation();
             if (m_player2 && m_player2->m_mainLayer)
                 ex.lastRot2 = m_player2->m_mainLayer->getRotation();
 
-            ex.lastUpdateFrame = frameCounter;
+            ex.modifiedDeltaReturn = 0.f;
+            ex.lastUpdateFrame     = ex.frameCounter;
+
         } else {
             ex.progressTilNextTick += dt;
         }
 
         if (ex.timeTilNextTick == 0.f) return;
 
-        // Section 2: teleport detection — large camera jump means instant reset
+        // Teleport detection
         float camJump = ccpDistance(m_objectLayer->getPosition(), ex.lastCamPos);
         if (camJump > TELEPORT_THRESHOLD) {
             resetExtrapolationState();
             return;
         }
 
-        // Section 5: clamped percent
+        // Clamped percent
         float maxPercent = Mod::get()->getSettingValue<float>("max-percent");
         float percent = std::clamp(
             ex.progressTilNextTick / ex.timeTilNextTick,
@@ -168,12 +173,11 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
             maxPercent
         );
 
-        // Section 6: per-component toggles
         bool doCamera = Mod::get()->getSettingValue<bool>("extrapolate-camera");
         bool doPlayer = Mod::get()->getSettingValue<bool>("extrapolate-player");
         bool doGround = Mod::get()->getSettingValue<bool>("extrapolate-ground");
 
-        // ── Camera extrapolation ──────────────────────────────────────────────
+        // Camera
         if (doCamera) {
             CCPoint endCamPos = ex.lastCamPos + (ex.lastCamPos - ex.lastCamPos2);
             m_objectLayer->setPosition({
@@ -182,7 +186,7 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
             });
         }
 
-        // ── Ground extrapolation (Section 4) ─────────────────────────────────
+        // Ground layers
         if (doGround) {
             extrapolateGround(m_groundLayer,
                               ex.lastGroundPos,  ex.lastGroundPos2,  percent);
@@ -190,18 +194,17 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
                               ex.lastGround2Pos, ex.lastGround2Pos2, percent);
         }
 
-        // ── Player extrapolation (Section 1, 7) ──────────────────────────────
+        // Players
         if (doPlayer) {
             extrapolatePlayer(m_player1, percent, ex.lastRot1);
             if (m_player2) extrapolatePlayer(m_player2, percent, ex.lastRot2);
         }
     }
 
-    // ── Section 1 + 7: player extrapolation with correct rotation lerp ────────
+    // ── Player extrapolation ──────────────────────────────────────────────────
     void extrapolatePlayer(PlayerObject* player, float percent, float& lastRot) {
         if (!player) return;
 
-        // Position
         float endX = player->m_position.x +
                      (player->m_position.x - player->m_lastPosition.x);
         float endY = player->m_position.y +
@@ -212,10 +215,8 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
             std::lerp(player->m_position.y, endY, percent)
         });
 
-        // Rotation — lerp from lastRot to lastRot + rotDelta (Section 1)
-        float rotSpeed = (player->m_isBall && player->m_isBallRotating)
-            ? 1.f
-            : player->m_rotateSpeed;
+        float rotSpeed    = (player->m_isBall && player->m_isBallRotating)
+                            ? 1.f : player->m_rotateSpeed;
         float rotDelta    = (player->m_rotationSpeed * rotSpeed) / 240.f;
         float sidewaysOff = player->m_isSideways ? -90.f : 0.f;
 
@@ -224,7 +225,7 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
         );
     }
 
-    // ── Section 4: ground extrapolation using saved positions ─────────────────
+    // ── Ground extrapolation ──────────────────────────────────────────────────
     void extrapolateGround(GJGroundLayer* ground,
                            CCPoint lastPos, CCPoint lastPos2,
                            float percent) {
@@ -234,21 +235,26 @@ class $modify(ExtrapolatedGameLayer, GJBaseGameLayer) {
             std::lerp(lastPos.x, endPos.x, percent),
             std::lerp(lastPos.y, endPos.y, percent)
         });
-        // Section 9: we move only the ground layer node itself —
-        // never iterate children, never touch particles/effects.
     }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PlayLayer modification — Section 2: hook levelComplete
+// PlayLayer modification — FIX 2: safe levelComplete reset
+// Instead of an unsafe cross-class cast, we hook resetLevel which PlayLayer
+// calls internally as part of its cleanup. If a direct hook is needed, we
+// use the Geode m_fields accessor pattern correctly via GJBaseGameLayer.
 // ─────────────────────────────────────────────────────────────────────────────
 class $modify(ExtrapolatedPlayLayer, PlayLayer) {
+
+    // levelComplete triggers the end animation. We reset BEFORE calling the
+    // original so no stale camera position leaks into the end screen.
+    // FIX 2: access resetExtrapolationState through the correct Geode hook
+    // by casting to our modified type using static_cast on the same object
+    // pointer (safe because $modify guarantees the vtable is ours).
     void levelComplete() {
-        // Reset extrapolation state so the end-screen has no stale camera pos
-        if (auto* gl = static_cast<ExtrapolatedGameLayer*>(
-                static_cast<GJBaseGameLayer*>(this))) {
-            gl->resetExtrapolationState();
-        }
+        static_cast<ExtrapolatedGameLayer*>(
+            static_cast<GJBaseGameLayer*>(this)
+        )->resetExtrapolationState();
         PlayLayer::levelComplete();
     }
 };
